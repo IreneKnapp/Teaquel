@@ -17,6 +17,11 @@ Executable teaquel
   hs-source-dirs: Haskell
   main-is: Main.hs
   build-depends: base >= 4.1 && < 5,
-                 text >= 0.11.2.3 && < 1.0
+                 array >= 0.4.0.0 && < 1,
+                 containers >= 0.4.2.1 && < 1,
+                 lifted-base >= 0.1.2 && < 1,
+                 mtl >= 2.1.2 && < 3,
+                 text >= 0.11.2.3 && < 1,
+                 transformers-base >= 0.4.1 && < 1
   default-language: Haskell2010
 

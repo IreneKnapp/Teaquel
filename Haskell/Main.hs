@@ -1,11 +1,21 @@
-{-# LANGUAGE OverloadedStrings, FlexibleInstances #-}
+{-# LANGUAGE OverloadedStrings, FlexibleInstances, MultiParamTypeClasses #-}
 module Main (main) where
 
+import Control.Concurrent.MVar.Lifted
+import Control.Monad.Base
+import Control.Monad.Error
+import Control.Monad.Reader
+import Data.Array.IO
 import Data.Char
 import Data.List
+import Data.Map (Map)
+import qualified Data.Map as Map
 import Data.Maybe
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
+import Data.Word
 
 
 class ShowText item where
@@ -187,6 +197,136 @@ instance ParseTokens [Statement] where
             Nothing -> Just (soFar, tokens)
             Just (statement, rest) -> visit (soFar ++ [statement]) rest
     in visit [] tokens
+
+
+data TransactionStatus
+  = RunningTransactionStatus
+  | CommittedTransactionStatus
+  | RolledBackTransactionStatus
+
+
+data Transaction =
+  Transaction {
+      transactionParent :: Maybe Transaction,
+      transactionStatus :: MVar TransactionStatus,
+      transactionDatabases :: MVar (Set Database),
+      transactionPages :: MVar (Map Int Page)
+    }
+
+
+data PageContent =
+  PageContent {
+      pageContentArray :: MVar (IOUArray Int Word8)
+    }
+
+
+data Page =
+  Page {
+      pageIndex :: MVar Int,
+      pageContentStack :: MVar (Map Transaction PageContent)
+    }
+
+
+data Database =
+  Database {
+      databaseID :: Int,
+      databaseFilename :: MVar Text,
+      databasePages :: MVar (Map Int Page)
+    }
+
+
+data TeaquelState =
+  TeaquelState {
+      teaquelStateIDs :: MVar [(Int, Int)],
+      teaquelStateDatabases :: MVar (Map Text Database),
+      teaquelStateTransaction :: MVar (Maybe Transaction)
+    }
+
+
+instance Error Text where
+  strMsg string = T.pack string
+
+
+type Teaquel = ErrorT Text (ReaderT TeaquelState IO)
+
+
+getTeaquelState :: Teaquel TeaquelState
+getTeaquelState = lift ask
+
+
+teaquelError :: Text -> Teaquel a
+teaquelError headline = throwError headline
+
+
+allocateID :: Teaquel Int
+allocateID = do
+  teaquelState <- getTeaquelState
+  let theIDsMVar = teaquelStateIDs teaquelState
+  theIDs <- takeMVar theIDsMVar
+  let loop prospectiveID [] = Just prospectiveID
+      loop prospectiveID ((startID, endID) : rest) =
+        if startID > prospectiveID
+          then Just prospectiveID
+          else if endID < maxBound
+                 then loop (endID + 1) rest
+                 else Nothing
+      maybeNewID = loop 0 theIDs
+  case maybeNewID of
+    Nothing -> do
+      putMVar theIDsMVar theIDs
+      teaquelError "Out of IDs."
+    Just newID -> do
+      let loop soFar [] = soFar ++ [(newID, newID)]
+          loop soFar (pair@(startID, endID) : rest) =
+            if startID > newID
+              then if startID == newID + 1
+                     then soFar ++ [(newID, endID)] ++ rest
+                     else soFar ++ [(newID, newID), pair] ++ rest
+              else if endID + 1 == newID
+                     then soFar ++ [(startID, newID)] ++ rest
+                     else loop (soFar ++ [pair]) rest
+          newIDs = loop [] theIDs
+      putMVar theIDsMVar newIDs
+      return newID
+
+
+deallocateID :: Int -> Teaquel ()
+deallocateID theID = do
+  -- TODO
+  return ()
+
+
+
+withoutTransaction :: Teaquel a -> Teaquel a
+withoutTransaction action = do
+  state <- getTeaquelState
+  let transactionMapMVar = teaquelStateTransaction state
+  transactionMap <- readMVar transactionMapMVar
+  case transactionMap of
+    Nothing -> action
+    Just _ -> teaquelError "Cannot be in a transaction."
+
+
+attachDatabase :: Text -> Teaquel ()
+attachDatabase filename = do
+  state <- getTeaquelState
+  let databaseMapMVar = teaquelStateDatabases state
+  databaseMap <- takeMVar databaseMapMVar
+  case Map.lookup filename databaseMap of
+    Just _ -> do
+      putMVar databaseMapMVar databaseMap
+      teaquelError "File already attached."
+    Nothing -> do
+      theID <- allocateID
+      filenameMVar <- newMVar filename
+      pagesMVar <- newMVar Map.empty
+      let database = Database {
+                         databaseID = theID,
+                         databaseFilename = filenameMVar,
+                         databasePages = pagesMVar
+                       }
+          newDatabaseMap = Map.insert filename database databaseMap
+      putMVar databaseMapMVar newDatabaseMap
 
 
 main :: IO ()

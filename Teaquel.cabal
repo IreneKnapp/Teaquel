@@ -1,0 +1,21 @@
+name: Teaquel
+version: 1.0
+cabal-version: >= 1.12
+build-type: Simple
+license: BSD3
+license-file: LICENSE
+copyright: Copyright (c) 2012 Irene Knapp
+author: Irene Knapp <ireney.knapp@gmail.com>
+maintainer: ireney.knapp@gmail.com
+homepage: http://ireneknapp.com/software/
+bug-reports: http://ireneknapp.com/issues/create/
+category: Database
+synopsis: Novel database implementation based on Modern Data
+description:
+
+Executable teaquel
+  hs-source-dirs: Haskell
+  main-is: Main.hs
+  build-depends: base >= 4.1 && < 5
+  default-language: Haskell2010
+

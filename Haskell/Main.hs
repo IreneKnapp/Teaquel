@@ -361,21 +361,6 @@ main = do
                   teaquelStateTransaction = transaction
 		}
   _ <- runErrorT $ flip runReaderT state $ do
-    let debugIDs = do
-          teaquelState <- getTeaquelState
-          let theIDsMVar = teaquelStateIDs teaquelState
-          theIDs <- readMVar theIDsMVar
-          liftIO $ putStrLn $ show theIDs
-    a <- allocateID
-    b <- allocateID
-    c <- allocateID
-    deallocateID b
-    b' <- allocateID
-    liftIO $ putStrLn $ intercalate ", " $ map show [a, b, c, b']
-    debugIDs
-    deallocateID b'
-    deallocateID c
-    deallocateID a
-    debugIDs
+    return () :: Teaquel ()
   return ()
 

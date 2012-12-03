@@ -247,11 +247,11 @@ instance Error Text where
   strMsg string = T.pack string
 
 
-type Teaquel = ErrorT Text (ReaderT TeaquelState IO)
+type Teaquel = ReaderT TeaquelState (ErrorT Text IO)
 
 
 getTeaquelState :: Teaquel TeaquelState
-getTeaquelState = lift ask
+getTeaquelState = ask
 
 
 teaquelError :: Text -> Teaquel a
@@ -292,9 +292,20 @@ allocateID = do
 
 deallocateID :: Int -> Teaquel ()
 deallocateID theID = do
-  -- TODO
-  return ()
-
+  teaquelState <- getTeaquelState
+  let theIDsMVar = teaquelStateIDs teaquelState
+  theIDs <- takeMVar theIDsMVar
+  let newIDs = concat $ map (\pair@(startID, endID) ->
+                               if (startID <= theID) && (theID <= endID)
+                                 then catMaybes [if startID < theID
+                                                   then Just (startID, theID - 1)
+                                                   else Nothing,
+                                                 if theID < endID
+                                                   then Just (theID + 1, endID)
+                                                   else Nothing]
+                                 else [pair])
+                            theIDs
+  putMVar theIDsMVar newIDs
 
 
 withoutTransaction :: Teaquel a -> Teaquel a
@@ -309,24 +320,25 @@ withoutTransaction action = do
 
 attachDatabase :: Text -> Teaquel ()
 attachDatabase filename = do
-  state <- getTeaquelState
-  let databaseMapMVar = teaquelStateDatabases state
-  databaseMap <- takeMVar databaseMapMVar
-  case Map.lookup filename databaseMap of
-    Just _ -> do
-      putMVar databaseMapMVar databaseMap
-      teaquelError "File already attached."
-    Nothing -> do
-      theID <- allocateID
-      filenameMVar <- newMVar filename
-      pagesMVar <- newMVar Map.empty
-      let database = Database {
-                         databaseID = theID,
-                         databaseFilename = filenameMVar,
-                         databasePages = pagesMVar
-                       }
-          newDatabaseMap = Map.insert filename database databaseMap
-      putMVar databaseMapMVar newDatabaseMap
+  withoutTransaction $ do
+    state <- getTeaquelState
+    let databaseMapMVar = teaquelStateDatabases state
+    databaseMap <- takeMVar databaseMapMVar
+    case Map.lookup filename databaseMap of
+      Just _ -> do
+        putMVar databaseMapMVar databaseMap
+        teaquelError "File already attached."
+      Nothing -> do
+        theID <- allocateID
+        filenameMVar <- newMVar filename
+        pagesMVar <- newMVar Map.empty
+        let database = Database {
+                           databaseID = theID,
+                           databaseFilename = filenameMVar,
+                           databasePages = pagesMVar
+                         }
+            newDatabaseMap = Map.insert filename database databaseMap
+        putMVar databaseMapMVar newDatabaseMap
 
 
 main :: IO ()
@@ -340,4 +352,30 @@ main = do
       putStrLn $ T.unpack $ showTextList $ showTokens
         (statements :: [Statement])
       putStrLn $ intercalate ", " $ map (show . T.unpack . showText) rest
+  ids <- newMVar []
+  databases <- newMVar Map.empty
+  transaction <- newMVar Nothing
+  let state = TeaquelState {
+                  teaquelStateIDs = ids,
+                  teaquelStateDatabases = databases,
+                  teaquelStateTransaction = transaction
+		}
+  _ <- runErrorT $ flip runReaderT state $ do
+    let debugIDs = do
+          teaquelState <- getTeaquelState
+          let theIDsMVar = teaquelStateIDs teaquelState
+          theIDs <- readMVar theIDsMVar
+          liftIO $ putStrLn $ show theIDs
+    a <- allocateID
+    b <- allocateID
+    c <- allocateID
+    deallocateID b
+    b' <- allocateID
+    liftIO $ putStrLn $ intercalate ", " $ map show [a, b, c, b']
+    debugIDs
+    deallocateID b'
+    deallocateID c
+    deallocateID a
+    debugIDs
+  return ()
 

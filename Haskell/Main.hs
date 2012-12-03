@@ -16,6 +16,8 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Word
+import Prelude hiding (FilePath)
+import System.IO hiding (FilePath)
 
 
 class ShowText item where
@@ -25,14 +27,26 @@ class ShowTextList item where
 
 
 data Keyword
-  = CreateKeyword
+  = AtKeyword
+  | AttachKeyword
+  | CreateKeyword
+  | DatabaseKeyword
+  | DatabasesKeyword
+  | DetachKeyword
   | DropKeyword
   | SchemaKeyword
+  | ShowKeyword
   deriving (Eq)
 instance ShowText Keyword where
+  showText AtKeyword = "AT"
+  showText AttachKeyword = "ATTACH"
   showText CreateKeyword = "CREATE"
+  showText DetachKeyword = "DETACH"
+  showText DatabaseKeyword = "DATABASE"
+  showText DatabasesKeyword = "DATABASES"
   showText DropKeyword = "DROP"
   showText SchemaKeyword = "SCHEMA"
+  showText ShowKeyword = "SHOW"
 
 
 data Token
@@ -41,14 +55,18 @@ data Token
   | RightParenthesisToken
   | CommaToken
   | SemicolonToken
+  | PeriodToken
   | NameToken Text
+  | StringToken Text
 instance Eq Token where
   KeywordToken a == KeywordToken b = a == b
   NameToken a == NameToken b = T.toLower a == T.toLower b
+  StringToken a == StringToken b = a == b
   LeftParenthesisToken == LeftParenthesisToken = True
   RightParenthesisToken == RightParenthesisToken = True
   CommaToken == CommaToken = True
   SemicolonToken == SemicolonToken = True
+  PeriodToken == PeriodToken = True
   _ == _ = False
 instance ShowText Token where
   showText (KeywordToken keyword) = showText keyword
@@ -56,7 +74,15 @@ instance ShowText Token where
   showText RightParenthesisToken = ")"
   showText CommaToken = ","
   showText SemicolonToken = ";"
+  showText PeriodToken = "."
   showText (NameToken text) = text
+  showText (StringToken text) =
+    T.concat ["'",
+              T.foldl' (\soFar c ->
+                          T.concat [soFar, if c == '\'' then "''" else T.pack [c]])
+                       ""
+                       text,
+              "'"]
 instance ShowTextList Token where
   showTextList [] = ""
   showTextList [token] = showText token
@@ -95,10 +121,12 @@ data TokenLexicalType
 tokenLexicalType :: Token -> TokenLexicalType
 tokenLexicalType (KeywordToken _) = WordTokenLexicalType
 tokenLexicalType (NameToken _) = WordTokenLexicalType
+tokenLexicalType (StringToken _) = WordTokenLexicalType
 tokenLexicalType LeftParenthesisToken = PunctuationTokenLexicalType
 tokenLexicalType RightParenthesisToken = PunctuationTokenLexicalType
 tokenLexicalType CommaToken = PunctuationTokenLexicalType
 tokenLexicalType SemicolonToken = PunctuationTokenLexicalType
+tokenLexicalType PeriodToken = PunctuationTokenLexicalType
 
 
 tokenSpaceBefore :: Token -> Bool
@@ -123,13 +151,32 @@ lexToken text =
         let (word, rest) =
               T.span (\c -> isLetter c || isDigit c || c == '_') text
             maybeKeyword = case T.unpack $ T.toUpper word of
+                             "AT" -> Just AtKeyword
+                             "ATTACH" -> Just AttachKeyword
+                             "DETACH" -> Just DetachKeyword
                              "CREATE" -> Just CreateKeyword
+                             "DATABASE" -> Just DatabaseKeyword
+                             "DATABASES" -> Just DatabasesKeyword
                              "DROP" -> Just DropKeyword
                              "SCHEMA" -> Just SchemaKeyword
+                             "SHOW" -> Just ShowKeyword
                              _ -> Nothing
         in case maybeKeyword of
              Just keyword -> Just (KeywordToken keyword, rest)
              Nothing -> Just (NameToken word, rest)
+      | character == '\'' ->
+        let loop soFar rest
+              | T.length rest == 0 =
+                  Nothing
+              | T.head rest /= '\'' =
+                  loop (T.snoc soFar $ T.head rest) (T.tail rest)
+              | T.length rest == 1 =
+                  Just (StringToken soFar, T.tail rest)
+              | T.head (T.tail rest) /= '\'' =
+                  Just (StringToken soFar, T.tail rest)
+              | otherwise =
+                  loop (T.snoc soFar '\'') (T.tail $ T.tail rest)
+        in loop "" rest
       | otherwise ->
         let maybeToken = case character of
                            '(' -> Just LeftParenthesisToken
@@ -157,40 +204,138 @@ class ParseTokens parseable where
   parseTokens :: [Token] -> Maybe (parseable, [Token])
 
 
+data DatabaseName = DatabaseName Text
+instance ShowTokens DatabaseName where
+  showTokens (DatabaseName name) =
+    [NameToken name]
+instance ParseTokens DatabaseName where
+  parseTokens (NameToken name
+               : rest) =
+    Just (DatabaseName name, rest)
+  parseTokens _ = Nothing
+
+
+data SchemaName = SchemaName (Maybe DatabaseName) Text
+instance ShowTokens SchemaName where
+  showTokens (SchemaName Nothing name) =
+    [NameToken name]
+  showTokens (SchemaName (Just databaseName) name) =
+    concat [showTokens databaseName,
+            [PeriodToken,
+             NameToken name]]
+instance ParseTokens SchemaName where
+  parseTokens (NameToken databaseName
+               : PeriodToken
+               : NameToken schemaName
+               : rest) =
+    Just (SchemaName (Just $ DatabaseName databaseName) schemaName, rest)
+  parseTokens (NameToken schemaName
+               : rest) =
+    Just (SchemaName Nothing schemaName, rest)
+  parseTokens _ = Nothing
+
+
+data FilePath = FilePath Text
+instance ShowTokens FilePath where
+  showTokens (FilePath string) =
+    [StringToken string]
+instance ParseTokens FilePath where
+  parseTokens (StringToken filePath
+               : rest) =
+    Just (FilePath filePath, rest)
+  parseTokens _ = Nothing
+
+
 data Statement
-  = CreateSchemaStatement Text
-  | DropSchemaStatement Text
+  = AttachDatabaseStatement DatabaseName FilePath
+  | DetachDatabaseStatement DatabaseName
+  | ShowDatabasesStatement
+  | CreateSchemaStatement SchemaName
+  | DropSchemaStatement SchemaName
 instance ShowTokens Statement where
+  showTokens (AttachDatabaseStatement name filePath) =
+    concat [[KeywordToken AttachKeyword,
+             KeywordToken DatabaseKeyword],
+            showTokens name,
+            [KeywordToken AtKeyword],
+            showTokens filePath,
+            [SemicolonToken]]
+  showTokens (DetachDatabaseStatement name) =
+    concat [[KeywordToken AttachKeyword,
+             KeywordToken DatabaseKeyword],
+            showTokens name,
+            [SemicolonToken]]
+  showTokens (ShowDatabasesStatement) =
+    [KeywordToken ShowKeyword,
+     KeywordToken DatabasesKeyword,
+     SemicolonToken]
   showTokens (CreateSchemaStatement name) =
-    [KeywordToken CreateKeyword,
-     KeywordToken SchemaKeyword,
-     NameToken name,
-     SemicolonToken]
+    concat [[KeywordToken CreateKeyword,
+             KeywordToken SchemaKeyword],
+            showTokens name,
+            [SemicolonToken]]
   showTokens (DropSchemaStatement name) =
-    [KeywordToken DropKeyword,
-     KeywordToken SchemaKeyword,
-     NameToken name,
-     SemicolonToken]
+    concat [[KeywordToken DropKeyword,
+             KeywordToken SchemaKeyword],
+            showTokens name,
+            [SemicolonToken]]
 instance ParseTokens Statement where
-  parseTokens [] = Nothing
+  parseTokens (KeywordToken AttachKeyword
+               : KeywordToken DatabaseKeyword
+               : rest) =
+    case parseTokens rest of
+      Just (databaseName,
+            (KeywordToken AtKeyword
+             : rest)) ->
+        case parseTokens rest of
+          Just (filePath, rest) ->
+            case rest of
+              (SemicolonToken
+               : rest) ->
+                Just (AttachDatabaseStatement databaseName filePath, rest)
+              _ -> Nothing
+          _ -> Nothing
+      _ -> Nothing
+  parseTokens (KeywordToken DetachKeyword
+               : KeywordToken DatabaseKeyword
+               : rest) =
+    case parseTokens rest of
+      Just (databaseName, rest) ->
+        case rest of
+          (SemicolonToken
+           : rest) ->
+            Just (DetachDatabaseStatement databaseName, rest)
+          _ -> Nothing
+      _ -> Nothing
+  parseTokens (KeywordToken ShowKeyword
+               : KeywordToken DatabasesKeyword
+               : SemicolonToken
+               : rest) =
+    Just (ShowDatabasesStatement, rest)
   parseTokens (KeywordToken CreateKeyword
                : KeywordToken SchemaKeyword
-               : NameToken name
-               : SemicolonToken
                : rest) =
-    Just (CreateSchemaStatement name, rest)
+    case parseTokens rest of
+      Just (schemaName, rest) ->
+        case rest of
+          (SemicolonToken
+           : rest) -> Just (CreateSchemaStatement schemaName, rest)
+          _ -> Nothing
   parseTokens (KeywordToken DropKeyword
                : KeywordToken SchemaKeyword
-               : NameToken name
-               : SemicolonToken
                : rest) =
-    Just (DropSchemaStatement name, rest)
+    case parseTokens rest of
+      Just (schemaName, rest) ->
+        case rest of
+          (SemicolonToken
+           : rest) -> Just (DropSchemaStatement schemaName, rest)
+          _ -> Nothing
+      Nothing -> Nothing
   parseTokens _ = Nothing
 instance ShowTokens [Statement] where
   showTokens [] = []
   showTokens (statement : rest) = showTokens statement ++ showTokens rest
 instance ParseTokens [Statement] where
-  parseTokens [] = Nothing
   parseTokens tokens =
     let visit soFar tokens =
           case parseTokens tokens of
@@ -230,15 +375,24 @@ data Page =
 data Database =
   Database {
       databaseID :: Int,
+      databaseNames :: MVar (Set Text),
       databaseFilename :: MVar Text,
-      databasePages :: MVar (Map Int Page)
+      databasePages :: MVar (Map Int Page),
+      databaseFileHandle :: MVar Handle
+    }
+
+
+data Databases =
+  Databases {
+      databasesByName :: Map Text Database,
+      databasesByFilePath :: Map Text Database
     }
 
 
 data TeaquelState =
   TeaquelState {
       teaquelStateIDs :: MVar [(Int, Int)],
-      teaquelStateDatabases :: MVar (Map Text Database),
+      teaquelStateDatabases :: MVar Databases,
       teaquelStateTransaction :: MVar (Maybe Transaction)
     }
 
@@ -318,42 +472,54 @@ withoutTransaction action = do
     Just _ -> teaquelError "Cannot be in a transaction."
 
 
-attachDatabase :: Text -> Teaquel ()
-attachDatabase filename = do
+attachDatabase :: DatabaseName -> FilePath -> Teaquel ()
+attachDatabase (DatabaseName name) (FilePath filename) = do
   withoutTransaction $ do
     state <- getTeaquelState
-    let databaseMapMVar = teaquelStateDatabases state
-    databaseMap <- takeMVar databaseMapMVar
-    case Map.lookup filename databaseMap of
-      Just _ -> do
-        putMVar databaseMapMVar databaseMap
-        teaquelError "File already attached."
+    let databasesMVar = teaquelStateDatabases state
+    databases <- takeMVar databasesMVar
+    case Map.lookup filename (databasesByFilePath databases) of
+      Just database -> do
+        names <- takeMVar $ databaseNames database
+        let newNames = Set.insert name names
+            newDatabases = databases {
+                               databasesByName =
+                                 Map.insert name database $ databasesByName databases
+                             }
+        putMVar (databaseNames database) newNames
+        putMVar databasesMVar newDatabases
       Nothing -> do
+        fileHandle <- liftIO $ openBinaryFile (T.unpack filename) ReadWriteMode
         theID <- allocateID
+        namesMVar <- newMVar (Set.singleton name)
         filenameMVar <- newMVar filename
         pagesMVar <- newMVar Map.empty
+        fileHandleMVar <- newMVar fileHandle
         let database = Database {
                            databaseID = theID,
+                           databaseNames = namesMVar,
                            databaseFilename = filenameMVar,
-                           databasePages = pagesMVar
+                           databasePages = pagesMVar,
+                           databaseFileHandle = fileHandleMVar
                          }
-            newDatabaseMap = Map.insert filename database databaseMap
-        putMVar databaseMapMVar newDatabaseMap
+            newDatabases = databases {
+                               databasesByName =
+                                 Map.insert name database
+                                   $ databasesByName databases,
+                               databasesByFilePath=
+                                 Map.insert filename database
+                                   $ databasesByFilePath databases
+                             }
+        putMVar databasesMVar newDatabases
 
 
 main :: IO ()
 main = do
-  let tokens = showTokens $ CreateSchemaStatement "some_schema"
-  putStrLn $ T.unpack $ showTextList tokens
-  let tokens = fromMaybe [] $ lexTokens $ "DROP SCHEMA some_schema;"
-  case parseTokens tokens of
-    Nothing -> putStrLn "No parse."
-    Just (statements, rest) -> do
-      putStrLn $ T.unpack $ showTextList $ showTokens
-        (statements :: [Statement])
-      putStrLn $ intercalate ", " $ map (show . T.unpack . showText) rest
   ids <- newMVar []
-  databases <- newMVar Map.empty
+  databases <- newMVar $ Databases {
+                             databasesByName = Map.empty,
+                             databasesByFilePath = Map.empty
+                           }
   transaction <- newMVar Nothing
   let state = TeaquelState {
                   teaquelStateIDs = ids,
@@ -361,6 +527,16 @@ main = do
                   teaquelStateTransaction = transaction
 		}
   _ <- runErrorT $ flip runReaderT state $ do
-    return () :: Teaquel ()
+    let loop [] = return () :: Teaquel ()
+        loop (inputLine : restInputLines) = do
+          let tokens = fromMaybe [] $ lexTokens inputLine
+          case parseTokens tokens of
+            Nothing -> liftIO $ putStrLn "No parse."
+            Just (statements, rest) -> do
+              liftIO $ putStrLn $ T.unpack $ showTextList $ showTokens
+                (statements :: [Statement])
+              loop restInputLines
+    loop ["ATTACH DATABASE main AT 'test.db';",
+          "SHOW DATABASES;",
+          "DETACH DATABASE main;"]
   return ()
-

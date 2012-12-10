@@ -18,6 +18,7 @@ import qualified Data.Text as T
 import Data.Word
 import Prelude hiding (FilePath)
 import System.IO hiding (FilePath)
+import System.Posix.Files
 
 
 class ShowText item where
@@ -385,7 +386,7 @@ data Database =
 data Databases =
   Databases {
       databasesByName :: Map Text Database,
-      databasesByFilePath :: Map Text Database
+      databasesByInode :: Map (Int, Int) Database
     }
 
 
@@ -478,39 +479,49 @@ attachDatabase (DatabaseName name) (FilePath filename) = do
     state <- getTeaquelState
     let databasesMVar = teaquelStateDatabases state
     databases <- takeMVar databasesMVar
-    case Map.lookup filename (databasesByFilePath databases) of
-      Just database -> do
-        names <- takeMVar $ databaseNames database
-        let newNames = Set.insert name names
-            newDatabases = databases {
-                               databasesByName =
-                                 Map.insert name database $ databasesByName databases
-                             }
-        putMVar (databaseNames database) newNames
-        putMVar databasesMVar newDatabases
+    case Map.lookup name (databasesByName databases) of
+      Just _ -> do
+        putMVar databasesMVar databases
+        teaquelError "Database name already attached."
       Nothing -> do
-        fileHandle <- liftIO $ openBinaryFile (T.unpack filename) ReadWriteMode
-        theID <- allocateID
-        namesMVar <- newMVar (Set.singleton name)
-        filenameMVar <- newMVar filename
-        pagesMVar <- newMVar Map.empty
-        fileHandleMVar <- newMVar fileHandle
-        let database = Database {
-                           databaseID = theID,
-                           databaseNames = namesMVar,
-                           databaseFilename = filenameMVar,
-                           databasePages = pagesMVar,
-                           databaseFileHandle = fileHandleMVar
-                         }
-            newDatabases = databases {
-                               databasesByName =
-                                 Map.insert name database
-                                   $ databasesByName databases,
-                               databasesByFilePath=
-                                 Map.insert filename database
-                                   $ databasesByFilePath databases
+        fileStatus <- liftIO $ getFileStatus (T.unpack filename)
+        let inode = (fromIntegral $ deviceID fileStatus,
+                     fromIntegral $ fileID fileStatus)
+        case Map.lookup inode (databasesByInode databases) of
+          Just database -> do
+             names <- takeMVar $ databaseNames database
+             let newNames = Set.insert name names
+                 newDatabases =
+                   databases {
+                       databasesByName =
+                         Map.insert name database $ databasesByName databases
+                     }
+             putMVar (databaseNames database) newNames
+             putMVar databasesMVar newDatabases
+          Nothing -> do
+            fileHandle <-
+              liftIO $ openBinaryFile (T.unpack filename) ReadWriteMode
+            theID <- allocateID
+            namesMVar <- newMVar (Set.singleton name)
+            filenameMVar <- newMVar filename
+            pagesMVar <- newMVar Map.empty
+            fileHandleMVar <- newMVar fileHandle
+            let database = Database {
+                               databaseID = theID,
+                               databaseNames = namesMVar,
+                               databaseFilename = filenameMVar,
+                               databasePages = pagesMVar,
+                               databaseFileHandle = fileHandleMVar
                              }
-        putMVar databasesMVar newDatabases
+                newDatabases = databases {
+                                   databasesByName =
+                                     Map.insert name database
+                                       $ databasesByName databases,
+                                   databasesByInode=
+                                     Map.insert inode database
+                                       $ databasesByInode databases
+                                 }
+            putMVar databasesMVar newDatabases
 
 
 main :: IO ()
@@ -518,7 +529,7 @@ main = do
   ids <- newMVar []
   databases <- newMVar $ Databases {
                              databasesByName = Map.empty,
-                             databasesByFilePath = Map.empty
+                             databasesByInode = Map.empty
                            }
   transaction <- newMVar Nothing
   let state = TeaquelState {
